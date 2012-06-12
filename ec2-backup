@@ -209,7 +209,6 @@ sub dd_backup {
     my $out;
 
     print "Archiving and copying to volume...\n" if $opts{v};
-    chdir($opts{d});
     $out = `tar -czvf - . | ssh root\@$INSTANCE{host} "gunzip | dd of=/dev/$DEVICE obs=256k"`;
     if ($? != 0) {
 	print "\n" if $opts{v};
@@ -279,6 +278,7 @@ sub main {
 
     parse_opts();
 
+    chdir($opts{d});
     $out = safe_exec("du", ("-s"));
     $out =~ m/(\d*)/;
     $size = ceil(($1 / 1048576) * 2); #KB->GB, doubled, rounded up
