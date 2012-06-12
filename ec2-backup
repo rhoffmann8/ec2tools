@@ -1,0 +1,295 @@
+#!/usr/bin/perl -T
+
+use Cwd 'abs_path';
+use Getopt::Std;
+use POSIX;
+use strict;
+use warnings;
+
+$ENV{'PATH'} = "/usr/bin:/usr/sbin:/bin:/usr/local/ec2/bin";
+
+my %opts=();
+my $AMI = "ami-b232d0db";
+my $DEVICE = "sdf";
+my $DEFAULT_TAG = "ec2-backup";
+
+sub safe_exec {
+
+    my $fh;
+    my($cmd, @args) = @_;
+    my $ret = "";
+
+    open($fh, '-|', $cmd, @args) or die "Can't exec $cmd: $!";
+    while (my $line = <$fh>) {
+        $ret .= $line;
+    }
+     
+    close $fh or die "Can't close handle for $cmd: $!";
+    return $ret;
+}
+
+sub usage {
+    print STDERR "Usage: $0 [-hv] [-i instance] [-m method] [-t tag] [-z zone] -d dir\n";
+}
+
+sub parse_opts {
+    if (!getopts("hvi:m:t:d:z:f:", \%opts)) {
+	usage();
+	exit 1;
+    }
+    if (defined $opts{h}) {
+	usage();
+	exit 0;
+    }
+    if (not defined $opts{d}) {
+	usage();
+	exit 1;
+    }
+
+    $opts{m} = "dd" if not defined $opts{m};
+    if ($opts{m} ne "dd") {
+	print STDERR "Invalid method $opts{m}; valid methods are dd (rsync TBD).";
+	exit 1;
+    }
+
+    #lazily untaint
+    $opts{d} =~ m/^(.+)$/ or die "Bad directory\n";
+    $opts{d} = $1;
+    (-d $opts{d}) or die "$opts{d} is not a directory\n";
+}
+
+sub get_instance {
+    
+    my %INSTANCE;
+    my $out;
+    
+    print "Checking for instance $opts{i}..." if $opts{v};
+    $out = safe_exec("ec2-describe-instances", ($opts{i}));
+    if ($? != 0) {
+	print "\n" if $opts{v};
+	print STDERR $out;
+	cleanup(\%INSTANCE, {}, 0);
+    }
+
+    if ($out =~ m/terminated/) {
+	print "Instance was terminated earlier. Exiting...\n" if $opts{v};
+    }
+
+    print "Done.\n" if $opts{v};
+    $out =~ m/(i-\w*)\s*(ami-\w*)\s*(ec2.*amazonaws\.com).*\+\d{4}\s*([\w\-]*)/;
+    return ("id", $1, "ami", $2, "host", $3, "zone", $4, "new", 0);
+}
+
+sub get_volume {
+
+    my %VOLUME;
+    my $out;
+
+    print "Checking for volume with tag name=$opts{t}..." if $opts{v};
+    $out = safe_exec("ec2-describe-tags", (
+			 "-F", "key=name",
+			 "-F", "value=$opts{t}"));
+    if ($out =~ m/(vol-\w*)/) {
+	print "Volume found.\n" if $opts{v};
+	$out = safe_exec("ec2-describe-volumes", ($1));
+	$out =~ m/(vol-\w*)\s*(\d*)\s*([\w\-]*)/;
+	return ("id", $1, "size", $2, "zone", $3, "new", 0);
+    } else {
+	print "Volume not found. Exiting...\n" if $opts{v};
+	exit 1;
+    }
+}
+
+sub create_instance {
+
+    my %INSTANCE;
+    my $out;
+
+    print "Starting image $AMI..." if $opts{v};
+
+    $out = safe_exec("./ec2-start-instance", ("-a $AMI"));
+    if ($? != 0) {
+	print "\n" if $opts{v};
+	print STDERR $out;
+	exit 1;
+    }
+    print "Done.\n" if $opts{v};
+
+    $out =~ m/^(i\-\w*?)\s(ec2.*amazonaws\.com)$/;
+    %INSTANCE = ("id", $1, "host", $2);
+
+    $out = safe_exec("ec2-describe-instances", ($INSTANCE{id}));
+    $out =~ m/\+\d{4}\s*([\w\-]*)/;
+    $INSTANCE{zone} = $1;
+
+    return ("id", $INSTANCE{id}, "ami", $AMI, "host", $INSTANCE{host}, "zone", $INSTANCE{zone}, "new", 1);
+}
+
+sub create_volume {
+
+    my %INSTANCE = %{(shift)};
+    my %VOLUME;
+    my $size = shift;
+    my $zone = shift;
+    my $out;
+
+    print "Creating volume..." if $opts{v};
+    $out = safe_exec("ec2-create-volume", ("-s", $size, 
+					   "-z", $zone));
+    if ($? != 0) {
+	print "\n" if $opts{v};
+	print STDERR $out;
+	cleanup(\%INSTANCE, {}, 0);
+    }
+    $out =~ m/(vol-\w*)\s*(\d*)\s*([\w\-]*)/;
+    %VOLUME = ("id", $1, "size", $2, "zone", $3, "new", 1);
+    print "Done.\n" if $opts{v};
+
+    if (not defined $opts{t}) {
+	$opts{t} = $DEFAULT_TAG;
+    }
+
+    print "Tagging volume with \"name=$opts{t}\"..." if $opts{v};
+    $out = safe_exec("ec2-create-tags", ($VOLUME{id}, 
+					 "--tag", "\"name=$opts{t}\""));
+    if ($? != 0) {
+	print "\n" if $opts{v};
+	print STDERR $out;
+	cleanup(\%INSTANCE, \%VOLUME, 0);
+	exit 1;
+    }
+    print "Done.\n" if $opts{v};
+    $VOLUME{tag} = $opts{t};
+
+    return %VOLUME;
+}
+
+sub attach_volume {
+    
+    my %INSTANCE = %{(shift)};
+    my %VOLUME = %{(shift)};
+    my $out;
+
+    print "Attaching volume $VOLUME{id}...\n" if $opts{v};
+    $out = safe_exec("ec2-attach-volume", ($VOLUME{id}, "-i", $INSTANCE{id},
+                                           "-d", $DEVICE));
+    if ($? != 0) {
+        print "\n" if $opts{v};
+	print STDERR $out;
+	cleanup(\%INSTANCE, \%VOLUME, 0);
+    }
+
+    #need this sleep for some reason
+    sleep(15);
+
+    print "Done.\n" if $opts{v}
+}
+
+sub detach_volume {
+    
+    my %INSTANCE = %{(shift)};
+    my %VOLUME = %{(shift)};
+    my $out;
+
+    print "Detaching volume..." if $opts{v};
+    $out = safe_exec("ec2-detach-volume", ($VOLUME{id}));
+    if ($? != 0) {
+        print "\n" if $opts{v};
+        print STDERR $out;
+	cleanup(\%INSTANCE, \%VOLUME, 0);
+	exit 1;
+    }
+    print "Done.\n" if $opts{v};
+}
+
+sub dd_backup {
+
+    my %INSTANCE = %{(shift)};
+    my %VOLUME = %{(shift)};
+    my $out;
+
+    print "Archiving and copying to volume...\n" if $opts{v};
+    chdir($opts{d});
+    $out = `tar -czvf - . | ssh root\@$INSTANCE{host} "gunzip | dd of=/dev/$DEVICE obs=256k"`;
+    if ($? != 0) {
+	print "\n" if $opts{v};
+	print STDERR $out;
+	cleanup(\%INSTANCE, \%VOLUME, 1);
+    }
+    print "Done.\n" if $opts{v};
+}
+
+sub cleanup {
+
+    my %INSTANCE = %{(shift)};
+    my %VOLUME = %{(shift)};
+    my $detach = shift;
+    my $out;
+    
+    print "Running cleanup...\n" if $opts{v};
+
+    if (%INSTANCE && $INSTANCE{new} == 1) {
+	print "Terminating instance $INSTANCE{id}..." if $opts{v};
+	$out = safe_exec("ec2-terminate-instance", ($INSTANCE{id}));
+	if ($? != 0) {
+	    print "\n" if $opts{v};
+	    print STDERR $out;
+	} else {
+	    print "Done.\n" if $opts{v};
+	}
+    }
+
+    if ($detach) {
+	detach_volume(\%INSTANCE, \%VOLUME);
+    }
+
+    if (%VOLUME && $VOLUME{new} == 1) {
+	print "Deleting volume $VOLUME{id} and its tag..." if $opts{v};
+	$out = safe_exec("ec2-delete-tags", ($VOLUME{tag}));
+	if ($? != 0) {
+	    print "\n" if $opts{v};
+	    print STDERR $out;
+	}
+	$out = safe_exec("ec2-delete-volume", ($VOLUME{id}));
+	if ($? != 0) {
+	    print "\n" if $opts{v};
+	    print STDERR $out;
+	} else {
+	    print "Done.\n" if $opts{v};
+	}
+    }
+
+    print "Exiting...\n" if $opts{v};
+}
+
+sub main {
+
+    my %INSTANCE;
+    my %VOLUME;
+    my $out;
+    my $size;
+
+    parse_opts();
+
+    if ($opts{i}) {
+	%INSTANCE = get_instance();
+    } else {
+	%INSTANCE = create_instance();
+    }
+
+    if ($opts{t}) {
+	%VOLUME = get_volume();
+    } else {
+	#need to actually calculate size, not hardcode it
+	%VOLUME = create_volume(\%INSTANCE, 5, "us-east-1c");
+    }
+
+    attach_volume(\%INSTANCE, \%VOLUME);
+    dd_backup(\%INSTANCE, \%VOLUME);
+    detach_volume(\%INSTANCE, \%VOLUME);
+
+    cleanup(\%INSTANCE, {}, 0);
+    exit 0;
+}
+
+main()

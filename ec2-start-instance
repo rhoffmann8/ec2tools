@@ -1,0 +1,92 @@
+#!/bin/sh
+
+############################################################################
+#
+# Rob Hoffmann, CS615 Aspects of System Administration
+#
+# ec2-start-instance -- start an Amazon EC2 instance
+#
+# This script will create an Amazon EC2 instance via the EC2 API tools and
+# print out the instance ID and hostname when finisihed.
+#
+# If the hostname cannot be determined the script will terminate the instance
+# and exit on a value of 1.
+#
+#############################################################################
+
+PROGNAME=ec2-start-instance
+AMI=ami-b232d0db
+VERBOSE=0
+INSTANCE=""
+HOST=""
+COUNT=15
+
+usage() {
+    echo "Usage: $PROGNAME [-hv] [-a ami]" >&2
+}
+
+while getopts a:hv o
+do
+    case "$o" in
+	a) AMI="$OPTARG";;
+	h) usage
+	    exit 0;;
+	v) VERBOSE=1;;
+	*) usage
+	    exit 1;;
+    esac
+done
+
+if [ $VERBOSE -eq 1 ]; then
+    echo "Starting image $AMI..."
+fi
+output=$(ec2-run-instances $AMI $EC2_RUN_INSTANCES_FLAGS 2>&1)
+if [ $? -ne 0 ]; then
+    echo $output
+    exit 1
+fi
+INSTANCE=$(echo $output | grep -P '(?<=\s)i-\w*' -o)
+
+if [ $VERBOSE -eq 1 ]; then
+    echo -n "Waiting for hostname"
+fi
+while [ "$HOST" = "" -a $COUNT -gt 0 ]
+do
+    if [ $VERBOSE -eq 1 ]; then
+	echo -n "."
+    fi
+    output=$(ec2-describe-instances $INSTANCE)
+    HOST=$(echo $output | grep -P 'ec2.*amazonaws.com' -o)
+    COUNT=$(( $COUNT - 1 ))
+done
+
+if [ $COUNT -eq 0 ]; then
+    echo
+    echo "Couldn't get hostname for $INSTANCE, sending termination signal..."
+    output=$(ec2-terminate-instances $INSTANCE)
+    if [ $? -ne 0 ]; then
+	echo "Termination failed, perhaps the image failed to boot?"
+    else
+	echo "Terminated."
+    fi
+    exit 1
+fi
+
+if [ $VERBOSE -eq 1 ]; then
+    echo
+    echo "Waiting for SSH connectivity..."
+fi
+output=$(ssh root@$HOST -q -o "StrictHostKeyChecking=no" -o "ConnectionAttempts 15" "exit");
+if [ $? -ne 0 ]; then
+    echo "Couldn't SSH to instance, sending termination signal..."
+    output=$(ec2-terminate-instances $INSTANCE)
+    if [ $? -ne 0 ]; then
+        echo "Termination failed."
+    else
+        echo "Terminated."
+    fi
+    exit 1
+fi
+
+echo $INSTANCE $HOST
+exit 0
