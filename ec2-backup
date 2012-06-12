@@ -230,7 +230,7 @@ sub cleanup {
 
     if (%INSTANCE && $INSTANCE{new} == 1) {
 	print "Terminating instance $INSTANCE{id}..." if $opts{v};
-	$out = safe_exec("ec2-terminate-instance", ($INSTANCE{id}));
+	$out = safe_exec("ec2-terminate-instances", ($INSTANCE{id}));
 	if ($? != 0) {
 	    print "\n" if $opts{v};
 	    print STDERR $out;
@@ -273,11 +273,15 @@ sub main {
     if (defined $ENV{'EC2_HOME'}) {
 	$ENV{'EC2_HOME'} =~ m/^(.+)$/;
 	$out = $1;
-	((-d $out) || (-f $out)) or die "EC2_HOME env variable not directory.";
+	(-d $out) or die "EC2_HOME env variable not directory.";
 	$ENV{'PATH'} .= ":".$out."/bin";
     }
 
     parse_opts();
+
+    $out = safe_exec("du", ("-s"));
+    $out =~ m/(\d*)/;
+    $size = ceil(($1 / 1048576) * 2); #KB->GB, doubled, rounded up
 
     if ($opts{i}) {
 	%INSTANCE = get_instance();
@@ -289,7 +293,7 @@ sub main {
 	%VOLUME = get_volume();
     } else {
 	#need to actually calculate size, not hardcode it
-	%VOLUME = create_volume(\%INSTANCE, 5, "us-east-1c");
+	%VOLUME = create_volume(\%INSTANCE, $size, $INSTANCE{zone});
     }
 
     attach_volume(\%INSTANCE, \%VOLUME);
