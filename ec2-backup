@@ -6,7 +6,7 @@ use POSIX;
 use strict;
 use warnings;
 
-$ENV{'PATH'} = "/usr/bin:/usr/sbin:/bin:/usr/local/ec2/bin";
+$ENV{'PATH'} = "/usr/bin:/usr/sbin:/bin";
 
 my %opts=();
 my $AMI = "ami-b232d0db";
@@ -268,6 +268,14 @@ sub main {
     my %VOLUME;
     my $out;
     my $size;
+
+    #untaint EC2_HOME, check if valid dir, and add to path with trailing "/bin"
+    if (defined $ENV{'EC2_HOME'}) {
+	$ENV{'EC2_HOME'} =~ m/^(.+)$/;
+	$out = $1;
+	((-d $out) || (-f $out)) or die "EC2_HOME env variable not directory.";
+	$ENV{'PATH'} .= ":".$out."/bin";
+    }
 
     parse_opts();
 
