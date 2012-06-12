@@ -1,19 +1,5 @@
 #!/bin/sh
 
-############################################################################
-#
-# Rob Hoffmann, CS615 Aspects of System Administration
-#
-# ec2-start-instance -- start an Amazon EC2 instance
-#
-# This script will create an Amazon EC2 instance via the EC2 API tools and
-# print out the instance ID and hostname when finisihed.
-#
-# If the hostname cannot be determined the script will terminate the instance
-# and exit on a value of 1.
-#
-#############################################################################
-
 PROGNAME=ec2-start-instance
 AMI=ami-b232d0db
 VERBOSE=0
